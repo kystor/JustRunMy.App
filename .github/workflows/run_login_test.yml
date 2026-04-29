@@ -1,11 +1,17 @@
 name: 多账号面板自动测试
 
 on:
-  # 监听代码推送
+  # 1. 监听代码推送：只有当 'login_test.py' 发生更改并提交时，才触发
   push:
     paths:
-      - 'login_test.py' # 只有当这个文件发生更改并提交时，才触发工作流
-  # 同时也保留手动触发按钮，方便调试
+      - 'login_test.py' 
+      
+  # 2. 定时任务：每天自动触发一次
+  schedule:
+    # 这里的 cron 表达式代表每天 UTC 时间 00:00 (北京时间早上 8:00) 触发
+    - cron: '0 18 * * *' 
+    
+  # 3. 手动触发：保留手动触发按钮，方便随时在网页上点击运行测试
   workflow_dispatch:
 
 jobs:
@@ -28,16 +34,16 @@ jobs:
 
       - name: 执行多账号自动化测试脚本
         env:
-          # 从 Secret 读取多账号配置
+          # 从 GitHub Secrets 读取多账号配置，保护隐私
           TEST_ACCOUNTS: ${{ secrets.TEST_ACCOUNTS }}
         run: |
-          # 使用 -u 参数确保输出不被缓存，能实时看到 Python 日志
+          # 使用 -u 参数确保 Python 输出不被缓存，能实时在 Actions 日志中看到打印信息
           xvfb-run python -u login_test.py
 
       - name: 上传测试截图结果 (Artifacts)
-        if: always() 
+        if: always() # 无论测试成功还是失败，都执行上传操作
         uses: actions/upload-artifact@v4
         with:
           name: test-screenshots-result
           path: screenshots/
-          retention-days: 7
+          retention-days: 7 # 截图文件保留 7 天
