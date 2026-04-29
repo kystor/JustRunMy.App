@@ -12,6 +12,7 @@ if not os.path.exists(SCREENSHOT_DIR):
 def take_screenshot(sb, account_index, step_name):
     """
     辅助函数：给当前网页拍照并保存
+    增加 account_index (账号序号)，防止不同账号的截图互相覆盖
     """
     file_path = os.path.join(SCREENSHOT_DIR, f"acc{account_index}_{step_name}.png")
     try:
@@ -56,13 +57,13 @@ def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
     return False
 
 # =========================================================
-# 【通用】Cloudflare Turnstile (内嵌组件) 处理逻辑
+# 【通用增强版】Cloudflare Turnstile (内嵌组件) 处理逻辑
 # =========================================================
 def _wait_turnstile_token(sb, timeout=30) -> bool:
     """等待后台生成真正的验证通过凭证 (Token)"""
     last_len = 0
     for _ in range(timeout):
-        # 页面上可能残留多个组件，我们遍历所有存放 token 的输入框，只要有一个生成了就行
+        # 页面上可能残留多个组件，遍历所有存放 token 的输入框，只要有一个生成了就行
         token_len = sb.execute_script('''
             var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
             for(var i=0; i<inps.length; i++) {
@@ -80,38 +81,51 @@ def _wait_turnstile_token(sb, timeout=30) -> bool:
     return False
 
 def handle_turnstile_widget(sb, account_index, step_prefix="验证") -> bool:
-    """通用的内嵌验证码处理函数（登录页和弹窗都能用）"""
+    """增强版内嵌验证码处理函数（能精准识别弹窗内的特征）"""
     try:
+        print("    👀 正在寻找 Turnstile 组件...")
+        turnstile_found = False
         # 等待 Turnstile 组件渲染
         for _ in range(15):
-            if sb.execute_script("return !!document.querySelector('.cf-turnstile');"):
+            # 【核心修复点】：增加多个维度的特征识别，防漏判
+            turnstile_found = sb.execute_script('''
+                return !!(
+                    document.querySelector('.cf-turnstile') ||
+                    document.querySelector('[data-sitekey]') ||
+                    document.querySelector('iframe[src*="challenges.cloudflare"]') ||
+                    document.querySelector('iframe[src*="turnstile"]') ||
+                    document.querySelector('input[name="cf-turnstile-response"]')
+                );
+            ''')
+            if turnstile_found:
                 break
             time.sleep(1)
-        else:
-            print("    ℹ️ 未检测到 Turnstile 组件，可能无需验证。")
+
+        if not turnstile_found:
+            print("    ℹ️ 15秒内未检测到 Turnstile 组件，尝试直接跳过。")
             return True
 
         print("    🧩 发现 Turnstile 组件，准备点击...")
-        # 尝试点击复选框
-        clicked = sb.execute_script('''
-            var cb = document.querySelector('.cf-turnstile input[type="checkbox"]');
-            if(cb){ cb.click(); return true; }
-            return false;
-        ''')
         
-        # 尝试点击标签
-        if not clicked:
-            sb.execute_script('''
-                var label = document.querySelector('.cf-turnstile label');
-                if(label) label.click();
-            ''')
+        # 首选方案：使用 SeleniumBase 内置的强力验证码点击
+        click_success = False
+        try:
+            sb.uc_gui_click_captcha()
+            click_success = True
+        except Exception as e:
+            print(f"    ⚠️ uc_gui_click_captcha 失败: {e}")
 
-        # 使用 SeleniumBase 强力点击
-        if not clicked:
-            try:
-                sb.uc_gui_click_captcha()
-            except Exception as e:
-                print(f"    ⚠️ uc_gui_click_captcha 失败: {e}")
+        # 备用方案：如果第一种没点到，用 JS 尝试点击复选框
+        if not click_success:
+            print("    🔄 尝试备用 JS 点击方案...")
+            sb.execute_script('''
+                var cb = document.querySelector('input[type="checkbox"]');
+                if(cb) { cb.click(); }
+                else {
+                    var label = document.querySelector('label');
+                    if(label) label.click();
+                }
+            ''')
 
         print("    ⏳ 等待 Turnstile 完成验证...")
         if _wait_turnstile_token(sb, timeout=30):
@@ -184,51 +198,62 @@ def process_account(account_index, username, password):
         time.sleep(5)
         take_screenshot(sb, account_index, "05_应用列表页")
 
-        # --- 步骤 6：进入应用详情并点击 Reset Timer ---
-        print(f"[{account_index}] 步骤 6: 查找应用并准备重置时间...")
+        # --- 步骤 6：循环查找并重置所有应用 ---
+        print(f"[{account_index}] 步骤 6: 查找所有应用并准备挨个重置...")
         try:
             app_card_selector = "div.cursor-pointer h3.font-semibold"
             
             if sb.is_element_visible(app_card_selector):
-                app_name = sb.get_text(app_card_selector)
-                print(f"[{account_index}] 找到应用: [{app_name}]，点击进入详情页...")
-                sb.click(app_card_selector)
-                time.sleep(5)
-                take_screenshot(sb, account_index, "06_应用详情页")
+                elements = sb.find_elements(app_card_selector)
+                app_count = len(elements)
+                print(f"[{account_index}] 📊 统共发现 {app_count} 个应用！准备开始批量处理...")
 
-                reset_btn_selector = "//button[contains(., 'Reset Timer')]"
-                
-                if sb.is_element_visible(reset_btn_selector):
-                    print(f"[{account_index}] 点击橙色的 Reset Timer 按钮...")
-                    sb.click(reset_btn_selector)
+                for i in range(app_count):
+                    cards = sb.find_elements(app_card_selector)
+                    current_card = cards[i]
+                    app_name = current_card.text
                     
-                    # --- 步骤 7：【新增】处理重置弹窗内的验证和确认 ---
-                    print(f"[{account_index}] 步骤 7: 等待重置确认弹窗...")
-                    time.sleep(3) # 等待弹窗弹出
-                    take_screenshot(sb, account_index, "07-1_重置弹窗出现")
+                    print(f"  -> [{account_index}] 正在处理第 {i+1}/{app_count} 个应用: [{app_name}]")
+                    current_card.click()
+                    time.sleep(4) 
+                    take_screenshot(sb, account_index, f"06_{app_name}_详情页")
 
-                    print(f"[{account_index}] 处理弹窗内的 CF 人机验证...")
-                    # 再次调用通用验证函数过掉弹窗里的盾
-                    handle_turnstile_widget(sb, account_index, step_prefix="07-2_弹窗验证")
+                    reset_btn_selector = "//button[contains(., 'Reset Timer')]"
+                    if sb.is_element_visible(reset_btn_selector):
+                        print(f"    [{account_index}] 点击橙色的 Reset Timer 按钮...")
+                        sb.click(reset_btn_selector)
+                        
+                        # --- 处理弹窗的修复点 ---
+                        print(f"    [{account_index}] 等待重置确认弹窗完全加载...")
+                        time.sleep(5)  # 之前是3秒，加长一点确保弹窗动画结束，CF脚本渲染完毕
+                        take_screenshot(sb, account_index, f"07_{app_name}_弹窗出现")
+                        
+                        print(f"    [{account_index}] 处理弹窗 CF 验证...")
+                        # 这次一定会揪出它了！
+                        handle_turnstile_widget(sb, account_index, step_prefix=f"07_{app_name}_弹窗验证")
 
-                    print(f"[{account_index}] 点击白色的 Just Reset 最终确认...")
-                    just_reset_selector = "//button[contains(., 'Just Reset')]"
-                    try:
-                        sb.click(just_reset_selector)
-                        time.sleep(4) # 等待后端处理重置请求
-                        take_screenshot(sb, account_index, "08_最终重置完成")
-                        print(f"[{account_index}] ✅ 重置操作已圆满完成！")
-                    except Exception as e:
-                        print(f"[{account_index}] ❌ 点击 Just Reset 失败: {e}")
+                        print(f"    [{account_index}] 点击 Just Reset 确认...")
+                        just_reset_selector = "//button[contains(., 'Just Reset')]"
+                        try:
+                            sb.click(just_reset_selector)
+                            time.sleep(5) # 给后端充足的处理时间
+                            take_screenshot(sb, account_index, f"08_{app_name}_重置完成")
+                            print(f"    [{account_index}] ✅ 应用 [{app_name}] 重置成功！")
+                        except Exception as e:
+                            print(f"    [{account_index}] ❌ [{app_name}] 点击 Just Reset 失败: {e}")
+                    else:
+                        print(f"    [{account_index}] ℹ️ 未找到 Reset Timer 按钮，可能时间还没到。")
+                    
+                    print(f"  <- [{account_index}] 返回应用列表页...")
+                    sb.open("https://justrunmy.app/panel/applications")
+                    time.sleep(5)
 
-                else:
-                    print(f"[{account_index}] ℹ️ 详情页未找到 Reset Timer 按钮，可能时间还没到。")
             else:
-                print(f"[{account_index}] ℹ️ 未找到可用的应用卡片。")
+                print(f"[{account_index}] ℹ️ 当前账号下没有找到任何应用卡片。")
                 
         except Exception as e:
-            print(f"[{account_index}] ❌ 流程发生错误: {e}")
-            take_screenshot(sb, account_index, "99_流程报错截图")
+            print(f"[{account_index}] ❌ 批量重置时间过程中发生错误: {e}")
+            take_screenshot(sb, account_index, "99_批量重置报错")
 
         print(f"[{account_index}] 🎉 当前账号测试流程执行完毕！")
 
