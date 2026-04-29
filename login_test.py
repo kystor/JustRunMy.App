@@ -4,7 +4,6 @@ from seleniumbase import SB
 
 # =========================================================
 # 准备工作：设置截图保存的文件夹
-# 作用：如果没有这个文件夹，程序会自动创建一个，防止保存截图时报错。
 # =========================================================
 SCREENSHOT_DIR = "screenshots"
 if not os.path.exists(SCREENSHOT_DIR):
@@ -17,7 +16,6 @@ def take_screenshot(sb, account_index, step_name):
         sb.save_screenshot(file_path)
         print(f"  📸 截图已保存: {file_path}")
     except Exception as e:
-        # 如果截图失败（比如网页还没加载出来），就默默跳过，不影响主程序运行
         pass
 
 # =========================================================
@@ -28,7 +26,6 @@ def is_cloudflare_interstitial(sb) -> bool:
     try:
         page_source = sb.get_page_source()
         title = sb.get_title().lower() if sb.get_title() else ""
-        # 根据页面上的常见提示词来判断是不是在过盾
         indicators = ["Just a moment", "Verify you are human", "Checking your browser", "Checking if the site connection is secure"]
         for ind in indicators:
             if ind in page_source:
@@ -36,10 +33,8 @@ def is_cloudflare_interstitial(sb) -> bool:
         if "just a moment" in title or "attention required" in title:
             return True
         
-        # 使用立即执行函数 (IIFE) 获取网页内容长度。这里去掉了外层的 return，防止报 SyntaxError
+        # 简单判断网页字数，防止屏蔽正常页面
         body_len = sb.execute_script('(function() { return document.body ? document.body.innerText.length : 0; })();')
-        
-        # 如果网页字很少，且代码里包含 cloudflare 网址，大概率也是在过盾
         if body_len is not None and body_len < 200 and "challenges.cloudflare.com" in page_source:
             return True
         return False
@@ -52,10 +47,9 @@ def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
     for attempt in range(max_attempts):
         print(f"    ▶ 绕过尝试 {attempt+1}/{max_attempts}")
         try:
-            # 使用 SeleniumBase 底层的高级功能：模拟真实鼠标去点击验证码
+            # 模拟真实鼠标去点击验证码
             sb.uc_gui_click_captcha()
             time.sleep(6)
-            # 如果点击后不再是 5 秒盾页面了，说明绕过成功
             if not is_cloudflare_interstitial(sb):
                 print("    ✅ Cloudflare 挑战已通过")
                 return True
@@ -65,19 +59,17 @@ def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
     return False
 
 # =========================================================
-# 处理 Turnstile 组件 (表单里的打钩验证码 / 终极防毒 Token 版)
+# 处理 Turnstile 组件 (纯 Python 原生抓取，终极防漏判版)
 # =========================================================
 def handle_turnstile_verification(sb) -> bool:
     """综合处理登录页和弹窗中的 CF Turnstile 验证码"""
     
-    # ==========================================
+    # ------------------------------------------
     # 步骤 1：先干掉左下角烦人的 Cookie 弹窗
-    # 作用：防止它挡住后面鼠标点击验证码的路线
-    # ==========================================
+    # ------------------------------------------
     try:
         # 使用最精准的 data-cky-tag 属性来定位“Accept All”按钮
         cookie_btn = 'button[data-cky-tag="accept-button"]'
-        
         if sb.is_element_visible(cookie_btn):
             print("    🍪 发现 Cookie 弹窗，正在精准点击关闭...")
             sb.click(cookie_btn)
@@ -85,36 +77,30 @@ def handle_turnstile_verification(sb) -> bool:
     except:
         pass
 
-    # ==========================================
-    # 步骤 2：把验证码移动到屏幕中间
-    # 作用：确保鼠标能看得到它，点得到它
-    # ==========================================
+    # ------------------------------------------
+    # 步骤 2：把验证码移动到屏幕中间，确保能点到
+    # ------------------------------------------
     sb.execute_script('''
-        (function() {
-            try {
-                var t = document.querySelector('.cf-turnstile') || 
-                        document.querySelector('iframe[src*="challenges.cloudflare"]') || 
-                        document.querySelector('iframe[src*="turnstile"]');
-                if (t) t.scrollIntoView({behavior:'smooth', block:'center'});
-            } catch(e) {}
-        })();
+        try {
+            var t = document.querySelector('.cf-turnstile') || 
+                    document.querySelector('iframe[src*="challenges.cloudflare"]') || 
+                    document.querySelector('iframe[src*="turnstile"]');
+            if (t) t.scrollIntoView({behavior:'smooth', block:'center'});
+        } catch(e) {}
     ''')
     time.sleep(2)
 
-    # ==========================================
-    # 步骤 3：检测页面上到底有没有验证码
-    # ==========================================
+    # ------------------------------------------
+    # 步骤 3：用纯 Python 语法检测页面有没有验证码
+    # ------------------------------------------
     has_turnstile = False
     for _ in range(15):
-        has_turnstile = sb.execute_script('''
-            (function() {
-                return !!(document.querySelector('.cf-turnstile') ||
-                          document.querySelector('[data-sitekey]') ||
-                          document.querySelector('iframe[src*="challenges.cloudflare"]') ||
-                          document.querySelector('iframe[src*="turnstile"]'));
-            })();
-        ''')
-        if has_turnstile:
+        # 原生检测：只要这几个特征元素在网页里出现任意一个，就说明有验证码！
+        if (sb.is_element_present('iframe[src*="challenges.cloudflare"]') or 
+            sb.is_element_present('iframe[src*="turnstile"]') or 
+            sb.is_element_present('.cf-turnstile') or 
+            sb.is_element_present('input[name="cf-turnstile-response"]')):
+            has_turnstile = True
             break
         time.sleep(1)
 
@@ -123,63 +109,50 @@ def handle_turnstile_verification(sb) -> bool:
         return True
 
     print("    🧩 发现 Turnstile 组件，开始执行物理拟人点击策略...")
-
     verified = False
     
-    # ==========================================
+    # ------------------------------------------
     # 步骤 4：循环 3 次，尝试用真实的鼠标轨迹去点击
-    # ==========================================
+    # ------------------------------------------
     for attempt in range(1, 4):
         print(f"    ▶ 点击尝试 {attempt}/3")
         
-        # 坚决不使用 JS 直接点击 checkbox，防止触发 Cloudflare 的“假币 (假 Token)”陷阱
-        # 统一交给底层 CDP 进行真实的物理鼠标拟人点击
+        # 交给底层 CDP 进行真实的物理鼠标拟人点击
         try:
             sb.uc_gui_click_captcha()
         except Exception as e:
             pass
             
-        # 等待服务器下发绿色的通行证 (Token)
+        # ------------------------------------------
+        # 步骤 5：用纯 Python 提取 Token，判断是否成功
+        # ------------------------------------------
         for _ in range(10):
-            token_len = sb.execute_script('''
-                (function() {
-                    var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
-                    for(var i=0; i<inps.length; i++) {
-                        // 如果 Token 长度大于 20，说明拿到了真正的通行证
-                        if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
-                    }
-                    return 0;
-                })();
-            ''')
-            # 增加安全检查，防止因为 JS 返回了空值导致后续 Python 代码报错
-            if token_len is not None and token_len > 20:
-                print(f"    ✅ Turnstile 物理点击成功！获取到 Token (长度 {token_len})")
-                verified = True
-                break
+            # 检查那个保存 Token 的隐藏输入框在不在
+            if sb.is_element_present('input[name="cf-turnstile-response"]'):
+                # 原生获取它的 value 属性（即 Token 字符串），绝不会再出现 None 的判断失误！
+                token = sb.get_attribute('input[name="cf-turnstile-response"]', 'value')
+                # 如果拿到字符串且长度大于 20，说明拿到了真正的通行证
+                if token and len(token) > 20:
+                    print(f"    ✅ Turnstile 物理点击成功！获取到 Token (长度 {len(token)})")
+                    verified = True
+                    break
             time.sleep(1)
             
         if verified:
             break
 
-    # ==========================================
-    # 步骤 5：如果主动点不到，就静静等待它自己绿
-    # ==========================================
+    # ------------------------------------------
+    # 步骤 6：如果主动点不到，就静静等待它自己绿
+    # ------------------------------------------
     if not verified:
         print("    ⏳ 物理点击未立刻生效，可能处于盾牌计算状态，被动等待 Turnstile 自动完成（30 秒）...")
         for _ in range(30):
-            token_len = sb.execute_script('''
-                (function() {
-                    var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
-                    for(var i=0; i<inps.length; i++) {
-                        if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
-                    }
-                    return 0;
-                })();
-            ''')
-            if token_len is not None and token_len > 20:
-                print(f"    ✅ Turnstile 自动完成！获取到 Token (长度 {token_len})")
-                verified = True
-                break
+            if sb.is_element_present('input[name="cf-turnstile-response"]'):
+                token = sb.get_attribute('input[name="cf-turnstile-response"]', 'value')
+                if token and len(token) > 20:
+                    print(f"    ✅ Turnstile 自动完成！获取到 Token (长度 {len(token)})")
+                    verified = True
+                    break
             time.sleep(1)
 
     if not verified:
@@ -214,7 +187,6 @@ def process_account(account_index, username, password):
         # --- 第 2 步：填写账号和密码 ---
         print(f"[{account_index}] 步骤 2: 填写账号密码...")
         try:
-            # 找到输入框并自动打字进去
             sb.wait_for_element_visible('input[type="email"], input[type="text"]', timeout=10)
             sb.type('input[type="email"], input[type="text"]', username)
             sb.type('input[type="password"]', password)
@@ -234,12 +206,12 @@ def process_account(account_index, username, password):
             sb.click('button.bg-emerald-600[type="submit"]')
         except:
             try:
-                # 备用方案：如果按钮点不到，直接让表单提交
+                # 备用方案：如果按钮点不到，直接用 JS 提交表单
                 sb.execute_script('(function() { document.querySelector("form").submit(); })();')
             except Exception as e:
                 print(f"[{account_index}] ❌ 点击登录失败: {e}")
 
-        time.sleep(6) # 给网页一点时间跳转
+        time.sleep(6) 
         take_screenshot(sb, account_index, "04_提交登录后")
 
         # --- 第 5 步：跳转到应用列表页 ---
@@ -251,7 +223,6 @@ def process_account(account_index, username, password):
         # --- 第 6 步：找到所有应用，准备重置时间 ---
         print(f"[{account_index}] 步骤 6: 查找所有应用并准备挨个重置...")
         try:
-            # 寻找页面上代表应用的卡片标题
             app_card_selector = "div.cursor-pointer h3.font-semibold"
             
             if sb.is_element_visible(app_card_selector):
@@ -259,9 +230,8 @@ def process_account(account_index, username, password):
                 app_count = len(elements)
                 print(f"[{account_index}] 📊 统共发现 {app_count} 个应用！准备开始批量处理...")
 
-                # 挨个点进去处理
                 for i in range(app_count):
-                    # 【重要防坑】：每次循环重新抓取网页上的元素，防止页面跳来跳去后找不到原来的卡片
+                    # 【重要防坑】：每次循环重新抓取网页上的元素，防止页面跳转后找错卡片
                     cards = sb.find_elements(app_card_selector)
                     current_card = cards[i]
                     app_name = current_card.text
@@ -285,14 +255,13 @@ def process_account(account_index, username, password):
                         take_screenshot(sb, account_index, f"07_{app_name}_弹窗出现")
                         
                         print(f"    [{account_index}] 处理弹窗 CF 验证...")
-                        # 再次调用我们上面写好的强大神仙函数处理验证码
                         handle_turnstile_verification(sb)
                         
                         take_screenshot(sb, account_index, f"08_{app_name}_验证码处理后状态")
 
                         print(f"    [{account_index}] 点击 Just Reset 确认...")
                         try:
-                            # 通过 JS 找名字包含 "Just Reset" 的按钮点下去
+                            # 这个操作比较简单直接用 JS 点击也是安全的，不涉及安全拦截
                             sb.execute_script('''
                                 (function() {
                                     var btns = document.querySelectorAll('button');
@@ -312,7 +281,6 @@ def process_account(account_index, username, password):
                     else:
                         print(f"    [{account_index}] ℹ️ 未找到 Reset Timer 按钮，可能时间还没到。")
                     
-                    # 退出来，准备处理下一个
                     print(f"  <- [{account_index}] 返回应用列表页...")
                     sb.open("https://justrunmy.app/panel/applications")
                     time.sleep(5)
@@ -330,7 +298,6 @@ def process_account(account_index, username, password):
 # 程序入口点 (脚本刚开始运行的地方)
 # =========================================================
 def main():
-    # 尝试从系统环境变量里拿出我们的多账号长字符串
     accounts_str = os.environ.get("TEST_ACCOUNTS", "")
     
     if not accounts_str:
@@ -338,12 +305,10 @@ def main():
         return
 
     account_list = []
-    # 按照英文逗号，把一长串字符串切成一段段的账号密码对
     for pair in accounts_str.split(','):
         pair = pair.strip()
         if not pair:
             continue
-        # 再用冒号把账号和密码拆开
         if ':' in pair:
             username, password = pair.split(':', 1) 
             account_list.append((username.strip(), password.strip()))
@@ -352,10 +317,8 @@ def main():
 
     print(f"✅ 成功解析到 {len(account_list)} 个待测试账号。")
 
-    # 开始遍历刚才整理好的列表，挨个干活
     for index, (username, password) in enumerate(account_list, 1):
         print("=" * 60)
-        # 给控制台显示的账号打个码，保护你的隐私
         masked_user = username
         if "@" in username:
             parts = username.split("@")
@@ -364,18 +327,15 @@ def main():
         print(f"▶ 正在处理第 {index} 个账号: {masked_user}")
         
         try:
-            # 调用前面写好的核心业务流程
             process_account(index, username, password)
         except Exception as e:
             print(f"❌ 处理账号 {masked_user} 时发生严重异常: {e}")
             
-        # 两个账号之间歇一会儿，别把服务器惹火了
         if index < len(account_list):
             print(f"等待 5 秒后继续测试下一个账号...")
             time.sleep(5)
 
     print("\n🎊 全部账号测试完毕！请前往 GitHub Artifacts 下载截图。")
 
-# 这是一个标准的 Python 规范，意思是“如果是直接运行这个文件，就执行 main()”
 if __name__ == "__main__":
     main()
