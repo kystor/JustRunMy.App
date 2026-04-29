@@ -31,8 +31,8 @@ def is_cloudflare_interstitial(sb) -> bool:
                 return True
         if "just a moment" in title or "attention required" in title:
             return True
-        # 【修复点】：增加 (function(){ ... })() 包裹，防止 SyntaxError
-        body_len = sb.execute_script('return (function() { return document.body ? document.body.innerText.length : 0; })();')
+        # 【修复点】：纯自执行函数，外层无 return
+        body_len = sb.execute_script('(function() { return document.body ? document.body.innerText.length : 0; })();')
         if body_len < 200 and "challenges.cloudflare.com" in page_source:
             return True
         return False
@@ -55,7 +55,7 @@ def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
     return False
 
 # =========================================================
-# 【重点移植】完全照搬 FreeMcServer 的 Turnstile 综合处理逻辑
+# 【核心修复】Turnstile 综合处理逻辑（防御 CDP SyntaxError）
 # =========================================================
 def handle_turnstile_verification(sb) -> bool:
     """综合处理登录页和弹窗中的 CF Turnstile 验证码"""
@@ -76,13 +76,14 @@ def handle_turnstile_verification(sb) -> bool:
     # 2. 检测到底有没有验证码
     has_turnstile = False
     for _ in range(15):
-        # 【修复点】：增加 (function(){ ... })() 包裹
+        # 【修复点】：纯自执行函数，外层无 return
         has_turnstile = sb.execute_script('''
-            return (function() {
+            (function() {
                 return !!(document.querySelector('.cf-turnstile') ||
                           document.querySelector('[data-sitekey]') ||
                           document.querySelector('iframe[src*="challenges.cloudflare"]') ||
-                          document.querySelector('iframe[src*="turnstile"]'));
+                          document.querySelector('iframe[src*="turnstile"]') ||
+                          document.querySelector('input[name="cf-turnstile-response"]'));
             })();
         ''')
         if has_turnstile:
@@ -94,21 +95,20 @@ def handle_turnstile_verification(sb) -> bool:
         return True
 
     print("    🧩 发现 Turnstile 组件，开始执行多轮点击策略...")
-
     verified = False
     
     # 3. 循环 3 次主动尝试点击
     for attempt in range(1, 4):
         print(f"    ▶ 点击尝试 {attempt}/3")
         
-        # (1) 模仿 handle_login_turnstile，先用 JS 点内部 checkbox
+        # (1) 用 JS 尝试点击 checkbox 或者 label
         sb.execute_script('''
             (function() {
                 try {
-                    var cb = document.querySelector('.cf-turnstile input[type="checkbox"]');
-                    if(cb){ cb.click(); }
+                    var cb = document.querySelector('input[type="checkbox"]');
+                    if(cb) { cb.click(); }
                     else {
-                        var label = document.querySelector('.cf-turnstile label');
+                        var label = document.querySelector('label');
                         if(label) label.click();
                     }
                 } catch(e) {}
@@ -123,9 +123,9 @@ def handle_turnstile_verification(sb) -> bool:
             
         # (3) 等待 Token 生成
         for _ in range(15):
-            # 【修复点】：把包含 return 的循环体严格包裹在函数内部
+            # 【修复点】：极其关键！外层不能有 return，代码包在 function 内
             token_len = sb.execute_script('''
-                return (function() {
+                (function() {
                     var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
                     for(var i=0; i<inps.length; i++) {
                         if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
@@ -133,7 +133,7 @@ def handle_turnstile_verification(sb) -> bool:
                     return 0;
                 })();
             ''')
-            if token_len > 20:
+            if token_len and int(token_len) > 20:
                 print(f"    ✅ Turnstile 主动点击成功！获取到 Token (长度 {token_len})")
                 verified = True
                 break
@@ -142,12 +142,12 @@ def handle_turnstile_verification(sb) -> bool:
         if verified:
             break
 
-    # 4. 如果 3 次主动点击全失败了，执行“被动等待 30 秒”兜底方案
+    # 4. 如果主动点击全失败了，执行“被动等待 30 秒”兜底方案
     if not verified:
         print("    ⏳ 主动点击均未成功，可能处于盾牌计算状态，被动等待 Turnstile 自动完成（30 秒）...")
         for _ in range(30):
             token_len = sb.execute_script('''
-                return (function() {
+                (function() {
                     var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
                     for(var i=0; i<inps.length; i++) {
                         if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
@@ -155,7 +155,7 @@ def handle_turnstile_verification(sb) -> bool:
                     return 0;
                 })();
             ''')
-            if token_len > 20:
+            if token_len and int(token_len) > 20:
                 print(f"    ✅ Turnstile 自动完成！获取到 Token (长度 {token_len})")
                 verified = True
                 break
@@ -210,6 +210,7 @@ def process_account(account_index, username, password):
             sb.click('button.bg-emerald-600[type="submit"]')
         except:
             try:
+                # 【修复点】：将表单提交也包裹起来
                 sb.execute_script('(function() { document.querySelector("form").submit(); })();')
             except Exception as e:
                 print(f"[{account_index}] ❌ 点击登录失败: {e}")
@@ -248,21 +249,19 @@ def process_account(account_index, username, password):
                         print(f"    [{account_index}] 点击橙色的 Reset Timer 按钮...")
                         sb.click(reset_btn_selector)
                         
-                        # ==================================================
-                        # 步骤 7：弹窗处理核心区
-                        # ==================================================
                         print(f"    [{account_index}] 等待重置确认弹窗完全加载...")
                         time.sleep(5)  
                         take_screenshot(sb, account_index, f"07_{app_name}_弹窗出现")
                         
                         print(f"    [{account_index}] 处理弹窗 CF 验证...")
+                        # 这次 CDP 协议再怎么切换，都不会报错了
                         handle_turnstile_verification(sb)
                         
                         take_screenshot(sb, account_index, f"08_{app_name}_验证码处理后状态")
 
                         print(f"    [{account_index}] 点击 Just Reset 确认...")
                         try:
-                            # 为了防止验证码挡住按钮，用 JS 强行点击
+                            # 【修复点】：完全合规的 IIFE
                             sb.execute_script('''
                                 (function() {
                                     var btns = document.querySelectorAll('button');
@@ -274,7 +273,7 @@ def process_account(account_index, username, password):
                                     }
                                 })();
                             ''')
-                            time.sleep(5) # 给后端充足的处理时间
+                            time.sleep(5)
                             take_screenshot(sb, account_index, f"09_{app_name}_重置完成")
                             print(f"    [{account_index}] ✅ 应用 [{app_name}] 重置成功！")
                         except Exception as e:
