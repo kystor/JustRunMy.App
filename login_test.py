@@ -31,7 +31,8 @@ def is_cloudflare_interstitial(sb) -> bool:
                 return True
         if "just a moment" in title or "attention required" in title:
             return True
-        body_len = sb.execute_script('return document.body ? document.body.innerText.length : 0;')
+        # 【修复点】：增加 (function(){ ... })() 包裹，防止 SyntaxError
+        body_len = sb.execute_script('return (function() { return document.body ? document.body.innerText.length : 0; })();')
         if body_len < 200 and "challenges.cloudflare.com" in page_source:
             return True
         return False
@@ -59,25 +60,30 @@ def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
 def handle_turnstile_verification(sb) -> bool:
     """综合处理登录页和弹窗中的 CF Turnstile 验证码"""
     
-    # 1. 尝试将验证码滚动到屏幕正中央 (原脚本的 _scroll_to_turnstile)
+    # 1. 尝试将验证码滚动到屏幕正中央
     sb.execute_script('''
-        try {
-            var t = document.querySelector('.cf-turnstile') || 
-                    document.querySelector('iframe[src*="challenges.cloudflare"]') || 
-                    document.querySelector('iframe[src*="turnstile"]');
-            if (t) t.scrollIntoView({behavior:'smooth', block:'center'});
-        } catch(e) {}
+        (function() {
+            try {
+                var t = document.querySelector('.cf-turnstile') || 
+                        document.querySelector('iframe[src*="challenges.cloudflare"]') || 
+                        document.querySelector('iframe[src*="turnstile"]');
+                if (t) t.scrollIntoView({behavior:'smooth', block:'center'});
+            } catch(e) {}
+        })();
     ''')
     time.sleep(2)
 
-    # 2. 检测到底有没有验证码 (原脚本的 _has_turnstile)
+    # 2. 检测到底有没有验证码
     has_turnstile = False
     for _ in range(15):
+        # 【修复点】：增加 (function(){ ... })() 包裹
         has_turnstile = sb.execute_script('''
-            return !!(document.querySelector('.cf-turnstile') ||
-                      document.querySelector('[data-sitekey]') ||
-                      document.querySelector('iframe[src*="challenges.cloudflare"]') ||
-                      document.querySelector('iframe[src*="turnstile"]'));
+            return (function() {
+                return !!(document.querySelector('.cf-turnstile') ||
+                          document.querySelector('[data-sitekey]') ||
+                          document.querySelector('iframe[src*="challenges.cloudflare"]') ||
+                          document.querySelector('iframe[src*="turnstile"]'));
+            })();
         ''')
         if has_turnstile:
             break
@@ -91,36 +97,41 @@ def handle_turnstile_verification(sb) -> bool:
 
     verified = False
     
-    # 3. 循环 3 次主动尝试点击 (完全还原原脚本处理逻辑)
+    # 3. 循环 3 次主动尝试点击
     for attempt in range(1, 4):
         print(f"    ▶ 点击尝试 {attempt}/3")
         
         # (1) 模仿 handle_login_turnstile，先用 JS 点内部 checkbox
         sb.execute_script('''
-            try {
-                var cb = document.querySelector('.cf-turnstile input[type="checkbox"]');
-                if(cb){ cb.click(); }
-                else {
-                    var label = document.querySelector('.cf-turnstile label');
-                    if(label) label.click();
-                }
-            } catch(e) {}
+            (function() {
+                try {
+                    var cb = document.querySelector('.cf-turnstile input[type="checkbox"]');
+                    if(cb){ cb.click(); }
+                    else {
+                        var label = document.querySelector('.cf-turnstile label');
+                        if(label) label.click();
+                    }
+                } catch(e) {}
+            })();
         ''')
         
-        # (2) 同时使用 SeleniumBase 底层点击作为保险 (来自 handle_turnstile_verification)
+        # (2) 同时使用 SeleniumBase 底层点击作为保险
         try:
             sb.uc_gui_click_captcha()
         except Exception as e:
             pass
             
-        # (3) 等待 Token 生成 (原脚本的 _wait_for_turnstile_token 核心判断)
+        # (3) 等待 Token 生成
         for _ in range(15):
+            # 【修复点】：把包含 return 的循环体严格包裹在函数内部
             token_len = sb.execute_script('''
-                var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
-                for(var i=0; i<inps.length; i++) {
-                    if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
-                }
-                return 0;
+                return (function() {
+                    var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
+                    for(var i=0; i<inps.length; i++) {
+                        if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
+                    }
+                    return 0;
+                })();
             ''')
             if token_len > 20:
                 print(f"    ✅ Turnstile 主动点击成功！获取到 Token (长度 {token_len})")
@@ -136,11 +147,13 @@ def handle_turnstile_verification(sb) -> bool:
         print("    ⏳ 主动点击均未成功，可能处于盾牌计算状态，被动等待 Turnstile 自动完成（30 秒）...")
         for _ in range(30):
             token_len = sb.execute_script('''
-                var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
-                for(var i=0; i<inps.length; i++) {
-                    if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
-                }
-                return 0;
+                return (function() {
+                    var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
+                    for(var i=0; i<inps.length; i++) {
+                        if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
+                    }
+                    return 0;
+                })();
             ''')
             if token_len > 20:
                 print(f"    ✅ Turnstile 自动完成！获取到 Token (长度 {token_len})")
@@ -197,7 +210,7 @@ def process_account(account_index, username, password):
             sb.click('button.bg-emerald-600[type="submit"]')
         except:
             try:
-                sb.execute_script('document.querySelector("form").submit()')
+                sb.execute_script('(function() { document.querySelector("form").submit(); })();')
             except Exception as e:
                 print(f"[{account_index}] ❌ 点击登录失败: {e}")
 
@@ -239,27 +252,27 @@ def process_account(account_index, username, password):
                         # 步骤 7：弹窗处理核心区
                         # ==================================================
                         print(f"    [{account_index}] 等待重置确认弹窗完全加载...")
-                        time.sleep(5)  # 等待弹窗弹出和 CF 组件渲染
+                        time.sleep(5)  
                         take_screenshot(sb, account_index, f"07_{app_name}_弹窗出现")
                         
                         print(f"    [{account_index}] 处理弹窗 CF 验证...")
-                        # 复用那套无敌的验证码点击逻辑
                         handle_turnstile_verification(sb)
                         
                         take_screenshot(sb, account_index, f"08_{app_name}_验证码处理后状态")
 
                         print(f"    [{account_index}] 点击 Just Reset 确认...")
-                        just_reset_selector = "//button[contains(., 'Just Reset')]"
                         try:
                             # 为了防止验证码挡住按钮，用 JS 强行点击
                             sb.execute_script('''
-                                var btns = document.querySelectorAll('button');
-                                for(var i=0; i<btns.length; i++) {
-                                    if(btns[i].innerText.includes('Just Reset')) {
-                                        btns[i].click();
-                                        break;
+                                (function() {
+                                    var btns = document.querySelectorAll('button');
+                                    for(var i=0; i<btns.length; i++) {
+                                        if(btns[i].innerText.includes('Just Reset')) {
+                                            btns[i].click();
+                                            break;
+                                        }
                                     }
-                                }
+                                })();
                             ''')
                             time.sleep(5) # 给后端充足的处理时间
                             take_screenshot(sb, account_index, f"09_{app_name}_重置完成")
