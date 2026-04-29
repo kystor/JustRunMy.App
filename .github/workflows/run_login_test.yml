@@ -1,0 +1,38 @@
+name: 多账号面板自动测试
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-login:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装系统依赖和 Python 库
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb
+          pip install seleniumbase
+
+      - name: 执行多账号自动化测试脚本
+        env:
+          # 我们把 Secret 里的多账号长字符串读取出来，传递给 TEST_ACCOUNTS 环境变量
+          TEST_ACCOUNTS: ${{ secrets.TEST_ACCOUNTS }}
+        run: |
+          # 运行测试，加上 -u 参数保证日志能实时看到，不被缓存截断
+          xvfb-run python -u login_test.py
+
+      - name: 上传测试截图结果 (Artifacts)
+        if: always() 
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-screenshots-result
+          path: screenshots/
+          retention-days: 7
