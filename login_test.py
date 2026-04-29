@@ -22,6 +22,7 @@ def take_screenshot(sb, account_index, step_name):
 # 移植自 FreeMcServer 的 CF 整页 5 秒盾处理
 # =========================================================
 def is_cloudflare_interstitial(sb) -> bool:
+    """检查当前页面是否是 Cloudflare 的 5 秒盾等待页"""
     try:
         page_source = sb.get_page_source()
         title = sb.get_title().lower() if sb.get_title() else ""
@@ -32,8 +33,7 @@ def is_cloudflare_interstitial(sb) -> bool:
         if "just a moment" in title or "attention required" in title:
             return True
         
-        # 【修正点 1】：去掉了最外层的 return 关键字。
-        # 在 uc=True 模式下，直接执行 IIFE 表达式即可返回值，防止引发 SyntaxError。
+        # 【修复点 1】：使用立即执行函数，并且外部不加 return 防止 SyntaxError
         body_len = sb.execute_script('(function() { return document.body ? document.body.innerText.length : 0; })();')
         
         if body_len is not None and body_len < 200 and "challenges.cloudflare.com" in page_source:
@@ -43,10 +43,12 @@ def is_cloudflare_interstitial(sb) -> bool:
         return False
 
 def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
+    """尝试绕过 Cloudflare 的整页盾"""
     print("  🛡️ 检测到 Cloudflare 整页挑战，尝试绕过...")
     for attempt in range(max_attempts):
         print(f"    ▶ 绕过尝试 {attempt+1}/{max_attempts}")
         try:
+            # 使用底层物理点击绕过验证码
             sb.uc_gui_click_captcha()
             time.sleep(6)
             if not is_cloudflare_interstitial(sb):
@@ -58,12 +60,25 @@ def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
     return False
 
 # =========================================================
-# 处理 Turnstile 综合处理逻辑
+# 处理 Turnstile 综合处理逻辑（防毒 Token 终极修复版）
 # =========================================================
 def handle_turnstile_verification(sb) -> bool:
     """综合处理登录页和弹窗中的 CF Turnstile 验证码"""
     
-    # 1. 尝试将验证码滚动到屏幕正中央 (这段没有外层 return，所以不会报错)
+    # ==========================================
+    # 【修复点 2】：先干掉 Cookie 弹窗，防止拦截鼠标点击路径
+    # 因为底层的 uc_gui_click_captcha 需要真实的鼠标移动路线
+    # ==========================================
+    try:
+        # 查找并点击 "Accept All" Cookie 按钮
+        if sb.is_element_visible('//button[contains(., "Accept All")]'):
+            print("    🍪 发现 Cookie 弹窗，正在关闭...")
+            sb.click('//button[contains(., "Accept All")]')
+            time.sleep(1)
+    except:
+        pass
+
+    # 1. 尝试将验证码滚动到屏幕正中央，确保完全在可视范围内
     sb.execute_script('''
         (function() {
             try {
@@ -76,10 +91,9 @@ def handle_turnstile_verification(sb) -> bool:
     ''')
     time.sleep(2)
 
-    # 2. 检测到底有没有验证码
+    # 2. 检测页面上到底有没有验证码组件
     has_turnstile = False
     for _ in range(15):
-        # 【修正点 2】：去掉了最外层的 return。让括号内的函数自执行并返回布尔值。
         has_turnstile = sb.execute_script('''
             (function() {
                 return !!(document.querySelector('.cf-turnstile') ||
@@ -96,7 +110,7 @@ def handle_turnstile_verification(sb) -> bool:
         print("    ℹ️ 未检测到 Turnstile 组件，可能已被系统判定为无感安全，直接放行。")
         return True
 
-    print("    🧩 发现 Turnstile 组件，开始执行多轮点击策略...")
+    print("    🧩 发现 Turnstile 组件，开始执行物理拟人点击策略...")
 
     verified = False
     
@@ -104,29 +118,15 @@ def handle_turnstile_verification(sb) -> bool:
     for attempt in range(1, 4):
         print(f"    ▶ 点击尝试 {attempt}/3")
         
-        # (1) 先用 JS 点内部 checkbox
-        sb.execute_script('''
-            (function() {
-                try {
-                    var cb = document.querySelector('.cf-turnstile input[type="checkbox"]');
-                    if(cb){ cb.click(); }
-                    else {
-                        var label = document.querySelector('.cf-turnstile label');
-                        if(label) label.click();
-                    }
-                } catch(e) {}
-            })();
-        ''')
-        
-        # (2) 同时使用 SeleniumBase 底层点击作为保险
+        # 【重要修复 3】：绝对不能使用 JavaScript 去直接点击 checkbox！那会导致 CF 下发“毒 Token”。
+        # 所以这里只使用 SeleniumBase 底层的 CDP 拟人化真实的鼠标轨迹进行物理点击。
         try:
             sb.uc_gui_click_captcha()
         except Exception as e:
             pass
             
-        # (3) 等待 Token 生成
-        for _ in range(15):
-            # 【修正点 3】：去掉最外层 return。循环检查是否有超过 20 字符的 Token。
+        # 等待 Token 生成
+        for _ in range(10):
             token_len = sb.execute_script('''
                 (function() {
                     var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
@@ -136,9 +136,9 @@ def handle_turnstile_verification(sb) -> bool:
                     return 0;
                 })();
             ''')
-            # 增加安全检查，防止 JS 返回 None 导致 Python 比大小报错
+            # 检查返回值是否有效（防止 None 导致代码报错），若拿到有效 Token，则成功
             if token_len is not None and token_len > 20:
-                print(f"    ✅ Turnstile 主动点击成功！获取到 Token (长度 {token_len})")
+                print(f"    ✅ Turnstile 物理点击成功！获取到 Token (长度 {token_len})")
                 verified = True
                 break
             time.sleep(1)
@@ -148,9 +148,8 @@ def handle_turnstile_verification(sb) -> bool:
 
     # 4. 如果 3 次主动点击全失败了，执行“被动等待 30 秒”兜底方案
     if not verified:
-        print("    ⏳ 主动点击均未成功，可能处于盾牌计算状态，被动等待 Turnstile 自动完成（30 秒）...")
+        print("    ⏳ 物理点击未立刻生效，可能处于盾牌计算状态，被动等待 Turnstile 自动完成（30 秒）...")
         for _ in range(30):
-            # 【修正点 4】：去掉最外层 return。
             token_len = sb.execute_script('''
                 (function() {
                     var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
@@ -167,7 +166,7 @@ def handle_turnstile_verification(sb) -> bool:
             time.sleep(1)
 
     if not verified:
-        print("    ❌ 验证失败，用尽了所有方法未能获得 Token。")
+        print("    ❌ 验证失败，未能获得有效的 Token。")
         return False
         
     return True
@@ -178,6 +177,7 @@ def handle_turnstile_verification(sb) -> bool:
 def process_account(account_index, username, password):
     print(f"\n[{account_index}] 🚀 开始启动浏览器测试账号...")
     
+    # 启用 uc (Undetected ChromeDriver) 防检测模式
     with SB(uc=True, test=True, locale="en", chromium_arg="--disable-blink-features=AutomationControlled") as sb:
         
         # --- 步骤 1：访问面板 ---
@@ -196,6 +196,7 @@ def process_account(account_index, username, password):
         # --- 步骤 2：输入账号和密码 ---
         print(f"[{account_index}] 步骤 2: 填写账号密码...")
         try:
+            # 等待输入框出现并进行填写
             sb.wait_for_element_visible('input[type="email"], input[type="text"]', timeout=10)
             sb.type('input[type="email"], input[type="text"]', username)
             sb.type('input[type="password"]', password)
@@ -212,9 +213,11 @@ def process_account(account_index, username, password):
         # --- 步骤 4：点击登录按钮 ---
         print(f"[{account_index}] 步骤 4: 点击 Sign In 提交...")
         try:
+            # 尝试用正常的页面元素点击提交
             sb.click('button.bg-emerald-600[type="submit"]')
         except:
             try:
+                # 如果常规点击失败，使用 JS 强制提交表单
                 sb.execute_script('(function() { document.querySelector("form").submit(); })();')
             except Exception as e:
                 print(f"[{account_index}] ❌ 点击登录失败: {e}")
@@ -239,6 +242,7 @@ def process_account(account_index, username, password):
                 print(f"[{account_index}] 📊 统共发现 {app_count} 个应用！准备开始批量处理...")
 
                 for i in range(app_count):
+                    # 每次循环重新获取元素，防止页面跳转刷新后引发“元素失效 (StaleElementReferenceException)”错误
                     cards = sb.find_elements(app_card_selector)
                     current_card = cards[i]
                     app_name = current_card.text
@@ -261,13 +265,14 @@ def process_account(account_index, username, password):
                         take_screenshot(sb, account_index, f"07_{app_name}_弹窗出现")
                         
                         print(f"    [{account_index}] 处理弹窗 CF 验证...")
+                        # 弹窗里可能再次出现验证码，这里完美复用了前面的处理函数
                         handle_turnstile_verification(sb)
                         
                         take_screenshot(sb, account_index, f"08_{app_name}_验证码处理后状态")
 
                         print(f"    [{account_index}] 点击 Just Reset 确认...")
                         try:
-                            # 这个 JS 点击写得很规范，没有外部 return，保持原样即可
+                            # 确认重置按钮
                             sb.execute_script('''
                                 (function() {
                                     var btns = document.querySelectorAll('button');
@@ -304,6 +309,7 @@ def process_account(account_index, username, password):
 # 程序入口
 # =========================================================
 def main():
+    # 从系统环境变量读取配置的账号密码
     accounts_str = os.environ.get("TEST_ACCOUNTS", "")
     
     if not accounts_str:
@@ -311,10 +317,12 @@ def main():
         return
 
     account_list = []
+    # 按逗号分割出每一个账号信息块
     for pair in accounts_str.split(','):
         pair = pair.strip()
         if not pair:
             continue
+        # 按冒号分离用户名和密码
         if ':' in pair:
             username, password = pair.split(':', 1) 
             account_list.append((username.strip(), password.strip()))
@@ -326,6 +334,7 @@ def main():
     for index, (username, password) in enumerate(account_list, 1):
         print("=" * 60)
         masked_user = username
+        # 给账号做个打码处理，防止日志泄露敏感信息
         if "@" in username:
             parts = username.split("@")
             masked_user = parts[0][:2] + "***@" + parts[1]
