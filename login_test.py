@@ -31,9 +31,12 @@ def is_cloudflare_interstitial(sb) -> bool:
                 return True
         if "just a moment" in title or "attention required" in title:
             return True
-        # 【修复点】：增加 (function(){ ... })() 包裹，防止 SyntaxError
-        body_len = sb.execute_script('return (function() { return document.body ? document.body.innerText.length : 0; })();')
-        if body_len < 200 and "challenges.cloudflare.com" in page_source:
+        
+        # 【修正点 1】：去掉了最外层的 return 关键字。
+        # 在 uc=True 模式下，直接执行 IIFE 表达式即可返回值，防止引发 SyntaxError。
+        body_len = sb.execute_script('(function() { return document.body ? document.body.innerText.length : 0; })();')
+        
+        if body_len is not None and body_len < 200 and "challenges.cloudflare.com" in page_source:
             return True
         return False
     except:
@@ -55,12 +58,12 @@ def bypass_cloudflare_interstitial(sb, max_attempts=3) -> bool:
     return False
 
 # =========================================================
-# 【重点移植】完全照搬 FreeMcServer 的 Turnstile 综合处理逻辑
+# 处理 Turnstile 综合处理逻辑
 # =========================================================
 def handle_turnstile_verification(sb) -> bool:
     """综合处理登录页和弹窗中的 CF Turnstile 验证码"""
     
-    # 1. 尝试将验证码滚动到屏幕正中央
+    # 1. 尝试将验证码滚动到屏幕正中央 (这段没有外层 return，所以不会报错)
     sb.execute_script('''
         (function() {
             try {
@@ -76,9 +79,9 @@ def handle_turnstile_verification(sb) -> bool:
     # 2. 检测到底有没有验证码
     has_turnstile = False
     for _ in range(15):
-        # 【修复点】：增加 (function(){ ... })() 包裹
+        # 【修正点 2】：去掉了最外层的 return。让括号内的函数自执行并返回布尔值。
         has_turnstile = sb.execute_script('''
-            return (function() {
+            (function() {
                 return !!(document.querySelector('.cf-turnstile') ||
                           document.querySelector('[data-sitekey]') ||
                           document.querySelector('iframe[src*="challenges.cloudflare"]') ||
@@ -101,7 +104,7 @@ def handle_turnstile_verification(sb) -> bool:
     for attempt in range(1, 4):
         print(f"    ▶ 点击尝试 {attempt}/3")
         
-        # (1) 模仿 handle_login_turnstile，先用 JS 点内部 checkbox
+        # (1) 先用 JS 点内部 checkbox
         sb.execute_script('''
             (function() {
                 try {
@@ -123,9 +126,9 @@ def handle_turnstile_verification(sb) -> bool:
             
         # (3) 等待 Token 生成
         for _ in range(15):
-            # 【修复点】：把包含 return 的循环体严格包裹在函数内部
+            # 【修正点 3】：去掉最外层 return。循环检查是否有超过 20 字符的 Token。
             token_len = sb.execute_script('''
-                return (function() {
+                (function() {
                     var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
                     for(var i=0; i<inps.length; i++) {
                         if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
@@ -133,7 +136,8 @@ def handle_turnstile_verification(sb) -> bool:
                     return 0;
                 })();
             ''')
-            if token_len > 20:
+            # 增加安全检查，防止 JS 返回 None 导致 Python 比大小报错
+            if token_len is not None and token_len > 20:
                 print(f"    ✅ Turnstile 主动点击成功！获取到 Token (长度 {token_len})")
                 verified = True
                 break
@@ -146,8 +150,9 @@ def handle_turnstile_verification(sb) -> bool:
     if not verified:
         print("    ⏳ 主动点击均未成功，可能处于盾牌计算状态，被动等待 Turnstile 自动完成（30 秒）...")
         for _ in range(30):
+            # 【修正点 4】：去掉最外层 return。
             token_len = sb.execute_script('''
-                return (function() {
+                (function() {
                     var inps = document.querySelectorAll('input[name="cf-turnstile-response"]');
                     for(var i=0; i<inps.length; i++) {
                         if(inps[i].value && inps[i].value.length > 20) return inps[i].value.length;
@@ -155,7 +160,7 @@ def handle_turnstile_verification(sb) -> bool:
                     return 0;
                 })();
             ''')
-            if token_len > 20:
+            if token_len is not None and token_len > 20:
                 print(f"    ✅ Turnstile 自动完成！获取到 Token (长度 {token_len})")
                 verified = True
                 break
@@ -262,7 +267,7 @@ def process_account(account_index, username, password):
 
                         print(f"    [{account_index}] 点击 Just Reset 确认...")
                         try:
-                            # 为了防止验证码挡住按钮，用 JS 强行点击
+                            # 这个 JS 点击写得很规范，没有外部 return，保持原样即可
                             sb.execute_script('''
                                 (function() {
                                     var btns = document.querySelectorAll('button');
