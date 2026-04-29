@@ -1,6 +1,11 @@
 name: 多账号面板自动测试
 
 on:
+  # 监听代码推送
+  push:
+    paths:
+      - 'login_test.py' # 只有当这个文件发生更改并提交时，才触发工作流
+  # 同时也保留手动触发按钮，方便调试
   workflow_dispatch:
 
 jobs:
@@ -23,10 +28,10 @@ jobs:
 
       - name: 执行多账号自动化测试脚本
         env:
-          # 我们把 Secret 里的多账号长字符串读取出来，传递给 TEST_ACCOUNTS 环境变量
+          # 从 Secret 读取多账号配置
           TEST_ACCOUNTS: ${{ secrets.TEST_ACCOUNTS }}
         run: |
-          # 运行测试，加上 -u 参数保证日志能实时看到，不被缓存截断
+          # 使用 -u 参数确保输出不被缓存，能实时看到 Python 日志
           xvfb-run python -u login_test.py
 
       - name: 上传测试截图结果 (Artifacts)
